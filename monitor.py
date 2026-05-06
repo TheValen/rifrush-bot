@@ -166,6 +166,7 @@ async def check_wallet(bot: Bot, session: aiohttp.ClientSession, wallet: dict):
 
     if chain == "sol":
         sig = await get_latest_sol_tx(session, address)
+        logger.info(f"SOL {short_addr(address)}: latest={short_addr(sig) if sig else None} last_tx={short_addr(last_tx) if last_tx else None}")
         if sig and sig != last_tx:
             new_tx_hash = sig
             alert_text  = format_sol_alert(sig, address, label)
@@ -175,9 +176,12 @@ async def check_wallet(bot: Bot, session: aiohttp.ClientSession, wallet: dict):
         tx = await fetchers[chain](session, address)
         if tx:
             tx_hash = tx.get("hash")
+            logger.info(f"EVM {short_addr(address)} [{chain}]: latest={short_addr(tx_hash)} last_tx={short_addr(last_tx) if last_tx else None} match={tx_hash == last_tx}")
             if tx_hash and tx_hash != last_tx:
                 new_tx_hash = tx_hash
                 alert_text  = format_evm_alert(tx, address, chain, label)
+        else:
+            logger.warning(f"EVM {short_addr(address)} [{chain}]: NO TX RETURNED from API")
 
     if new_tx_hash and alert_text:
         try:
