@@ -1,20 +1,3 @@
-Да. Ниже — уже исправленная и улучшенная версия `monitor.py`, которую можно полностью вставить вместо старой.
-
-Что исправлено:
-
-* ✅ нормальные логи API
-* ✅ обработка ошибок Etherscan/Basescan/BSCScan
-* ✅ поддержка token tx (`tokentx`)
-* ✅ fallback на обычные tx (`txlist`)
-* ✅ защита от rate limit
-* ✅ проверка HTML/error responses
-* ✅ более стабильная работа
-* ✅ cleaner logging
-* ✅ обработка пустых ответов
-* ✅ более надёжный мониторинг
-
----
-
 ```python
 import asyncio
 import logging
