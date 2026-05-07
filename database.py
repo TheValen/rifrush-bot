@@ -1,110 +1,144 @@
-import aiosqlite
+import os
+import asyncpg
+import logging
 
-DB_PATH = "rifrush.db"
+logger = logging.getLogger(__name__)
+
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+
+# ── Connection pool ─────────────────────────────────────
+
+_pool: asyncpg.Pool | None = None
+
+async def get_pool() -> asyncpg.Pool:
+    global _pool
+    if _pool is None:
+        _pool = await asyncpg.create_pool(
+            DATABASE_URL,
+            ssl="require",
+            min_size=1,
+            max_size=5,
+        )
+        logger.info("Database pool created")
+    return _pool
+
+# ── Init tables ─────────────────────────────────────────
 
 async def init_db():
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
-                user_id     INTEGER PRIMARY KEY,
-                username    TEXT,
+                user_id     BIGINT PRIMARY KEY,
+                username    TEXT DEFAULT '',
                 plan        TEXT DEFAULT 'free',
                 paid_until  TEXT,
-                created_at  TEXT DEFAULT (datetime('now'))
+                created_at  TIMESTAMP DEFAULT NOW()
             )
         """)
-        await db.execute("""
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS wallets (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id     INTEGER,
-                address     TEXT,
-                chain       TEXT,
-                label       TEXT,
+                id          SERIAL PRIMARY KEY,
+                user_id     BIGINT NOT NULL,
+                address     TEXT NOT NULL,
+                chain       TEXT NOT NULL,
+                label       TEXT DEFAULT '',
                 last_tx     TEXT,
-                added_at    TEXT DEFAULT (datetime('now')),
+                added_at    TIMESTAMP DEFAULT NOW(),
                 UNIQUE(user_id, address, chain)
             )
         """)
-        await db.commit()
+        logger.info("Tables ready")
 
-# ── USERS ──────────────────────────────────────────────
+# ── USERS ────────────────────────────────────────────────
 
 async def get_user(user_id: int) -> dict | None:
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT * FROM users WHERE user_id = ?", (user_id,)
-        ) as cur:
-            row = await cur.fetchone()
-            return dict(row) if row else None
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM users WHERE user_id = $1", user_id
+        )
+        return dict(row) if row else None
 
 async def upsert_user(user_id: int, username: str = ""):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("""
             INSERT INTO users (user_id, username)
-            VALUES (?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET username = excluded.username
-        """, (user_id, username))
-        await db.commit()
+            VALUES ($1, $2)
+            ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username
+        """, user_id, username)
 
 async def upgrade_user(user_id: int, plan: str, paid_until: str):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
-            UPDATE users SET plan = ?, paid_until = ? WHERE user_id = ?
-        """, (plan, paid_until, user_id))
-        await db.commit()
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE users SET plan = $1, paid_until = $2 WHERE user_id = $3
+        """, plan, paid_until, user_id)
 
-# ── WALLETS ────────────────────────────────────────────
+# ── WALLETS ──────────────────────────────────────────────
 
 PLAN_LIMITS = {"free": 3, "hunter": 25, "apex": 9999}
 
 async def get_wallet_count(user_id: int) -> int:
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT COUNT(*) FROM wallets WHERE user_id = ?", (user_id,)
-        ) as cur:
-            row = await cur.fetchone()
-            return row[0] if row else 0
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT COUNT(*) as cnt FROM wallets WHERE user_id = $1", user_id
+        )
+        return row["cnt"] if row else 0
 
 async def add_wallet(user_id: int, address: str, chain: str, label: str = "") -> bool:
+    pool = await get_pool()
     try:
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("""
+        async with pool.acquire() as conn:
+            await conn.execute("""
                 INSERT INTO wallets (user_id, address, chain, label)
-                VALUES (?, ?, ?, ?)
-            """, (user_id, address.lower(), chain, label))
-            await db.commit()
+                VALUES ($1, $2, $3, $4)
+            """, user_id, address.lower(), chain, label)
         return True
-    except aiosqlite.IntegrityError:
-        return False  # already exists
+    except asyncpg.UniqueViolationError:
+        return False
 
 async def remove_wallet(user_id: int, address: str, chain: str):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
-            DELETE FROM wallets WHERE user_id = ? AND address = ? AND chain = ?
-        """, (user_id, address.lower(), chain))
-        await db.commit()
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            DELETE FROM wallets WHERE user_id = $1 AND address = $2 AND chain = $3
+        """, user_id, address.lower(), chain)
+
+async def remove_wallet_by_id(wallet_id: int, user_id: int):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            DELETE FROM wallets WHERE id = $1 AND user_id = $2
+        """, wallet_id, user_id)
 
 async def get_user_wallets(user_id: int) -> list[dict]:
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT * FROM wallets WHERE user_id = ? ORDER BY added_at DESC",
-            (user_id,)
-        ) as cur:
-            rows = await cur.fetchall()
-            return [dict(r) for r in rows]
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT * FROM wallets WHERE user_id = $1 ORDER BY added_at DESC
+        """, user_id)
+        return [dict(r) for r in rows]
 
 async def get_all_wallets() -> list[dict]:
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM wallets") as cur:
-            rows = await cur.fetchall()
-            return [dict(r) for r in rows]
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT * FROM wallets")
+        return [dict(r) for r in rows]
 
 async def update_last_tx(wallet_id: int, tx_hash: str):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "UPDATE wallets SET last_tx = ? WHERE id = ?", (tx_hash, wallet_id)
-        )
-        await db.commit()
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE wallets SET last_tx = $1 WHERE id = $2
+        """, tx_hash, wallet_id)
+
+async def get_stats() -> dict:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        users   = await conn.fetchval("SELECT COUNT(*) FROM users")
+        wallets = await conn.fetchval("SELECT COUNT(*) FROM wallets")
+        paid    = await conn.fetchval("SELECT COUNT(*) FROM users WHERE plan != 'free'")
+        return {"users": users, "wallets": wallets, "paid": paid}
