@@ -170,11 +170,8 @@ async def cb_remove(cb: CallbackQuery):
         return
 
     # Remove by id
-    import aiosqlite
-    async with aiosqlite.connect("rifrush.db") as db:
-        await db.execute("DELETE FROM wallets WHERE id = ? AND user_id = ?",
-                         (wallet_id, cb.from_user.id))
-        await db.commit()
+    from database import remove_wallet_by_id
+    await remove_wallet_by_id(wallet_id, cb.from_user.id)
 
     await cb.answer("✅ Removed")
     await cb_my_wallets(cb)
@@ -531,19 +528,13 @@ async def cmd_upgrade_user(msg: Message):
 async def cmd_stats(msg: Message):
     if msg.from_user.id != ADMIN_ID:
         return
-    import aiosqlite
-    async with aiosqlite.connect("rifrush.db") as db:
-        async with db.execute("SELECT COUNT(*) FROM users") as c:
-            users = (await c.fetchone())[0]
-        async with db.execute("SELECT COUNT(*) FROM wallets") as c:
-            wallets = (await c.fetchone())[0]
-        async with db.execute("SELECT COUNT(*) FROM users WHERE plan != 'free'") as c:
-            paid = (await c.fetchone())[0]
+    from database import get_stats
+    s = await get_stats()
     await msg.answer(
         f"📊 <b>Rifrush Stats</b>\n\n"
-        f"👤 Users: <b>{users}</b>\n"
-        f"👁 Wallets tracked: <b>{wallets}</b>\n"
-        f"💰 Paid users: <b>{paid}</b>",
+        f"👤 Users: <b>{s['users']}</b>\n"
+        f"👁 Wallets tracked: <b>{s['wallets']}</b>\n"
+        f"💰 Paid users: <b>{s['paid']}</b>",
         parse_mode="HTML"
     )
 
