@@ -1,4 +1,15 @@
+```txt id="e1kfxv"
 aiogram==3.4.1
 aiohttp==3.9.3
 asyncpg==0.29.0
 python-dotenv==1.0.1
+
+supabase==2.4.0
+httpx==0.27.0
+
+pydantic==2.6.1
+postgrest==0.16.3
+gotrue==2.4.2
+realtime==1.0.4
+storage3==0.7.4
+```
