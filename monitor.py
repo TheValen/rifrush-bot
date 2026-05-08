@@ -1,11 +1,10 @@
-```python
 import asyncio
 import logging
 import os
 import aiohttp
 from aiogram import Bot
 
-from database import get_all_wallets, update_last_tx
+from database import get_all_wallets, update_last_tx, check_and_expire_plans
 from utils import short_addr, CHAIN_EMOJI, CHAIN_LABELS
 
 ETHERSCAN_KEY = os.getenv("ETHERSCAN_API_KEY", "")
@@ -251,9 +250,19 @@ async def start_monitor(bot: Bot):
 
     await asyncio.sleep(5)
 
+    iteration = 0
+
     async with aiohttp.ClientSession() as session:
 
         while True:
+
+            # Check and expire paid plans once per hour (every 60 iterations)
+            iteration += 1
+            if iteration % 60 == 0:
+                try:
+                    await check_and_expire_plans()
+                except Exception as e:
+                    logger.error(f"expire plans error: {e}")
 
             try:
                 wallets = await get_all_wallets()
@@ -384,4 +393,3 @@ async def check_wallet(
                 f"Failed sending alert "
                 f"to {user_id}: {e}"
             )
-```
