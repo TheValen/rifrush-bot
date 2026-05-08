@@ -482,7 +482,7 @@ async def cmd_check_payment(msg: Message):
                 plan = payload.split(":")[1]
                 if plan in PLAN_PRICES:
                     from datetime import datetime, timedelta
-                    paid_until = (datetime.utcnow() + timedelta(days=30)).isoformat()
+                    paid_until = datetime.utcnow() + timedelta(days=30)
                     await upgrade_user(user_id, plan, paid_until)
                     await msg.answer(
                         f"✅ <b>Payment confirmed!</b>\n\n"
@@ -520,7 +520,7 @@ async def cmd_upgrade_user(msg: Message):
     from datetime import datetime, timedelta
     uid        = int(parts[1])
     plan       = parts[2]
-    paid_until = (datetime.utcnow() + timedelta(days=30)).isoformat()
+    paid_until = datetime.utcnow() + timedelta(days=30)
     await upgrade_user(uid, plan, paid_until)
     await msg.answer(f"✅ User {uid} → {plan.upper()} until {paid_until[:10]}")
 
