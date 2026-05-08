@@ -1,7 +1,7 @@
-```python id="db_full_fixed_v1"
 import os
 import asyncpg
 import logging
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +51,7 @@ async def init_db():
             )
         """)
 
-        # WALLETS TABLE
+        # WALLETS TABLE — no FOREIGN KEY to avoid Supabase RLS issues
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS wallets (
                 id          SERIAL PRIMARY KEY,
@@ -61,21 +61,15 @@ async def init_db():
                 label       TEXT DEFAULT '',
                 last_tx     TEXT,
                 added_at    TIMESTAMP DEFAULT NOW(),
-
-                FOREIGN KEY (user_id)
-                    REFERENCES users(user_id)
-                    ON DELETE CASCADE,
-
                 UNIQUE(user_id, address, chain)
             )
         """)
 
-        # INDEXES (performance)
+        # INDEXES
         await conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_wallets_user_id
             ON wallets(user_id)
         """)
-
         await conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_wallets_chain
             ON wallets(chain)
@@ -96,7 +90,6 @@ async def get_user(user_id: int) -> dict | None:
             "SELECT * FROM users WHERE user_id = $1",
             user_id
         )
-
         return dict(row) if row else None
 
 
@@ -112,7 +105,12 @@ async def upsert_user(user_id: int, username: str = ""):
         """, user_id, username)
 
 
-async def upgrade_user(user_id: int, plan: str, paid_until):
+async def upgrade_user(user_id: int, plan: str, paid_until: datetime):
+    """
+    paid_until must be a datetime object, e.g.:
+    from datetime import datetime, timedelta
+    paid_until = datetime.utcnow() + timedelta(days=30)
+    """
     pool = await get_pool()
 
     async with pool.acquire() as conn:
@@ -123,22 +121,40 @@ async def upgrade_user(user_id: int, plan: str, paid_until):
         """, plan, paid_until, user_id)
 
 
+async def check_and_expire_plans():
+    """
+    Call this periodically to downgrade expired paid plans back to free.
+    Run once per hour from monitor.py.
+    """
+    pool = await get_pool()
+
+    async with pool.acquire() as conn:
+        result = await conn.execute("""
+            UPDATE users
+            SET plan = 'free', paid_until = NULL
+            WHERE plan != 'free'
+              AND paid_until IS NOT NULL
+              AND paid_until < NOW()
+        """)
+        # result looks like "UPDATE 2" — extract count
+        count = int(result.split()[-1])
+        if count > 0:
+            logger.info(f"Expired {count} paid plan(s) → downgraded to free")
+
+
 # ─────────────────────────────────────────────
 # WALLETS
 # ─────────────────────────────────────────────
 
 PLAN_LIMITS = {
-    "free": 3,
+    "free":   3,
     "hunter": 25,
-    "apex": 9999
+    "apex":   9999,
 }
 
 
 def normalize_address(address: str, chain: str) -> str:
-    """
-    IMPORTANT:
-    EVM chains use lowercase, Solana must remain case-sensitive
-    """
+    """EVM chains → lowercase. Solana → case-sensitive, keep as-is."""
     return address.lower() if chain in ("eth", "bsc", "base") else address
 
 
@@ -150,7 +166,6 @@ async def get_wallet_count(user_id: int) -> int:
             "SELECT COUNT(*) as cnt FROM wallets WHERE user_id = $1",
             user_id
         )
-
         return row["cnt"] if row else 0
 
 
@@ -163,7 +178,6 @@ async def add_wallet(user_id: int, address: str, chain: str, label: str = "") ->
                 INSERT INTO wallets (user_id, address, chain, label)
                 VALUES ($1, $2, $3, $4)
             """, user_id, normalize_address(address, chain), chain, label)
-
         return True
 
     except asyncpg.UniqueViolationError:
@@ -199,7 +213,6 @@ async def get_user_wallets(user_id: int) -> list[dict]:
             WHERE user_id = $1
             ORDER BY added_at DESC
         """, user_id)
-
         return [dict(r) for r in rows]
 
 
@@ -208,7 +221,6 @@ async def get_all_wallets() -> list[dict]:
 
     async with pool.acquire() as conn:
         rows = await conn.fetch("SELECT * FROM wallets")
-
         return [dict(r) for r in rows]
 
 
@@ -217,9 +229,7 @@ async def update_last_tx(wallet_id: int, tx_hash: str):
 
     async with pool.acquire() as conn:
         await conn.execute("""
-            UPDATE wallets
-            SET last_tx = $1
-            WHERE id = $2
+            UPDATE wallets SET last_tx = $1 WHERE id = $2
         """, tx_hash, wallet_id)
 
 
@@ -227,15 +237,9 @@ async def get_stats() -> dict:
     pool = await get_pool()
 
     async with pool.acquire() as conn:
-        users = await conn.fetchval("SELECT COUNT(*) FROM users")
+        users   = await conn.fetchval("SELECT COUNT(*) FROM users")
         wallets = await conn.fetchval("SELECT COUNT(*) FROM wallets")
-        paid = await conn.fetchval(
+        paid    = await conn.fetchval(
             "SELECT COUNT(*) FROM users WHERE plan != 'free'"
         )
-
-        return {
-            "users": users,
-            "wallets": wallets,
-            "paid": paid
-        }
-```
+        return {"users": users, "wallets": wallets, "paid": paid}
