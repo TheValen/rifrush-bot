@@ -58,22 +58,25 @@ async def get_latest_evm_tx(
     then falls back to normal native txs.
     """
 
-    explorer_urls = {
-        "eth": "https://api.etherscan.io/api",
-        "bsc": "https://api.bscscan.com/api",
-        "base": "https://api.basescan.org/api",
+    # Etherscan V2 API — single endpoint with chainid
+    chain_ids = {
+        "eth":  "1",
+        "bsc":  "56",
+        "base": "8453",
     }
 
-    base_url = explorer_urls.get(chain)
+    chain_id = chain_ids.get(chain)
 
-    if not base_url:
+    if not chain_id:
         return None
+
+    base_url = f"https://api.etherscan.io/v2/api?chainid={chain_id}"
 
     # ── 1. TOKEN TX (USDT/USDC/ERC20/etc) ──
 
     token_url = (
         f"{base_url}"
-        f"?module=account"
+        f"&module=account"
         f"&action=tokentx"
         f"&address={address}"
         f"&page=1"
@@ -104,7 +107,7 @@ async def get_latest_evm_tx(
 
     normal_url = (
         f"{base_url}"
-        f"?module=account"
+        f"&module=account"
         f"&action=txlist"
         f"&address={address}"
         f"&startblock=0"
@@ -256,13 +259,13 @@ async def start_monitor(bot: Bot):
 
         while True:
 
-            # Check and expire paid plans once per hour (every 60 iterations)
             iteration += 1
             if iteration % 60 == 0:
                 try:
                     await check_and_expire_plans()
                 except Exception as e:
-                    logger.error(f"expire plans error: {e}")
+                    logger.error(f'expire plans error: {e}')
+
 
             try:
                 wallets = await get_all_wallets()
