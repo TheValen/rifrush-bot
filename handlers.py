@@ -106,20 +106,47 @@ def chain_kb() -> InlineKeyboardMarkup:
 @router.message(CommandStart())
 async def cmd_start(msg: Message, state: FSMContext):
     await state.clear()
+    is_new = await get_user(msg.from_user.id) is None
     await upsert_user(msg.from_user.id, msg.from_user.username or "")
     user  = await get_user(msg.from_user.id)
     plan  = user["plan"] if user else "free"
     count = await get_wallet_count(msg.from_user.id)
 
-    await msg.answer(
-        "🔔 <b>Rifrush</b> — On-Chain Wallet Tracker\n\n"
-        "I watch wallets on ETH, SOL, BSC and Base\n"
-        "and alert you the moment funds move.\n\n"
-        f"Plan: <b>{plan.upper()}</b> · "
-        f"Wallets: <b>{count}/{PLAN_LIMITS[plan]}</b>",
-        parse_mode="HTML",
-        reply_markup=main_menu(plan, count)
-    )
+    if is_new:
+        # Onboarding for new users
+        await msg.answer(
+            "👋 <b>Welcome to Rifrush!</b>
+
+"
+            "I track crypto wallets on ETH, SOL, BSC and Base
+"
+            "and send you an instant Telegram alert the moment funds move.
+
+"
+            "🚀 <b>Get started in 3 steps:</b>
+
+"
+            "1️⃣ Tap <b>🐋 Whale Watchlist</b> — add a known whale in one tap
+"
+            "2️⃣ Or tap <b>➕ Add</b> — paste any wallet address
+"
+            "3️⃣ Receive instant alerts when funds move
+
+"
+            "✅ <b>3 wallets free forever</b> · No signup · No KYC",
+            parse_mode="HTML",
+            reply_markup=main_menu(plan, count)
+        )
+    else:
+        await msg.answer(
+            "🔔 <b>Rifrush</b> — On-Chain Wallet Tracker
+
+"
+            f"Plan: <b>{plan.upper()}</b> · "
+            f"Wallets: <b>{count}/{PLAN_LIMITS[plan]}</b>",
+            parse_mode="HTML",
+            reply_markup=main_menu(plan, count)
+        )
 
 # ── My Wallets ───────────────────────────────────────────
 
@@ -487,7 +514,7 @@ async def cmd_check_payment(msg: Message):
                     await msg.answer(
                         f"✅ <b>Payment confirmed!</b>\n\n"
                         f"Plan: <b>{PLAN_NAMES[plan]}</b>\n"
-                        f"Active until: <b>{paid_until[:10]}</b>\n\n"
+                        f"Active until: <b>{paid_until.strftime('%Y-%m-%d')}</b>\n\n"
                         "Enjoy your upgraded limits!",
                         parse_mode="HTML",
                         reply_markup=back_kb()
@@ -507,6 +534,85 @@ async def cmd_check_payment(msg: Message):
         logging.error(f"checkpayment error: {e}")
         await msg.answer("⚠️ Error checking payment. Try again.")
 
+
+# ── /threshold ───────────────────────────────────────────
+
+@router.message(Command("threshold"))
+async def cmd_threshold(msg: Message):
+    """Set minimum alert threshold. Hunter: from $100. Apex: from $1."""
+    user = await get_user(msg.from_user.id)
+    plan = user["plan"] if user else "free"
+
+    if plan == "free":
+        await msg.answer(
+            "🔒 <b>Custom threshold is a paid feature</b>
+
+"
+            "Free plan filters moves under <b>$500</b> automatically.
+
+"
+            "Upgrade to Hunter ($19/mo) to set your own threshold from $100.
+"
+            "Upgrade to Apex ($49/mo) for threshold from $1.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬆️ Upgrade", callback_data="upgrade")]
+            ])
+        )
+        return
+
+    min_amount = 100 if plan == "hunter" else 1
+    await msg.answer(
+        f"🎚 <b>Set Alert Threshold</b>
+
+"
+        f"Your plan: <b>{plan.upper()}</b>
+"
+        f"Minimum allowed: <b>${min_amount}</b>
+
+"
+        "Reply with a number — minimum USD value for alerts.
+"
+        f"Example: <code>500</code> — only alert on moves > $500
+
+"
+        "<i>Current threshold is stored per-session. "
+        "Persistent threshold storage coming soon.</i>",
+        parse_mode="HTML"
+    )
+
+
+# ── /digest ──────────────────────────────────────────────
+
+@router.message(Command("digest"))
+async def cmd_digest(msg: Message):
+    """Manual daily digest — summary of tracked wallets."""
+    wallets = await get_user_wallets(msg.from_user.id)
+
+    if not wallets:
+        await msg.answer(
+            "📊 No wallets tracked yet.
+Add wallets first with ➕ Add.",
+            parse_mode="HTML"
+        )
+        return
+
+    lines = ["📊 <b>Your Wallet Summary</b>
+"]
+    for w in wallets:
+        emoji = {"eth": "⟠", "bsc": "⬡", "base": "🔵", "sol": "◎"}.get(w["chain"], "🔗")
+        label = f" <i>{w['label']}</i>" if w.get("label") else ""
+        last = f"Last tx: <code>{w['last_tx'][:10]}…</code>" if w.get("last_tx") else "No activity yet"
+        lines.append(f"{emoji}{label} <code>{w['address'][:6]}…{w['address'][-4:]}</code>
+   {last}")
+
+    lines.append(f"
+<i>Tracking {len(wallets)} wallet(s) · Updates every minute</i>")
+
+    await msg.answer("
+
+".join(lines), parse_mode="HTML")
+
 # ── Admin commands ───────────────────────────────────────
 
 @router.message(Command("upgrade_user"))
@@ -522,7 +628,7 @@ async def cmd_upgrade_user(msg: Message):
     plan       = parts[2]
     paid_until = datetime.utcnow() + timedelta(days=30)
     await upgrade_user(uid, plan, paid_until)
-    await msg.answer(f"✅ User {uid} → {plan.upper()} until {paid_until[:10]}")
+    await msg.answer(f"✅ User {uid} → {plan.upper()} until {paid_until.strftime('%Y-%m-%d')}")
 
 @router.message(Command("stats"))
 async def cmd_stats(msg: Message):
@@ -543,19 +649,55 @@ async def cmd_stats(msg: Message):
 @router.callback_query(F.data == "help")
 async def cb_help(cb: CallbackQuery):
     await cb.message.edit_text(
-        "❓ <b>How Rifrush works</b>\n\n"
-        "1️⃣ Add any wallet address\n"
-        "2️⃣ I monitor it 24/7 on-chain\n"
-        "3️⃣ Instant Telegram alert on every move\n\n"
-        "<b>Commands:</b>\n"
-        "/start — Main menu\n"
-        "/checkpayment — Verify your payment\n\n"
-        "<b>Chains:</b>\n"
-        "⟠ ETH · ◎ SOL · ⬡ BSC · 🔵 Base\n\n"
-        "<b>Plans:</b>\n"
-        "🆓 Free — 3 wallets\n"
-        "🎯 Hunter — 25 wallets · $19/mo\n"
-        "⚡ Apex — Unlimited · $49/mo",
+        "❓ <b>Rifrush — Help</b>
+
+"
+        "<b>How it works:</b>
+"
+        "1️⃣ Add any wallet (EVM or Solana)
+"
+        "2️⃣ Bot monitors it 24/7 on-chain
+"
+        "3️⃣ Instant Telegram alert on every move
+
+"
+        "<b>Commands:</b>
+"
+        "/start — Main menu
+"
+        "/checkpayment — Verify crypto payment
+"
+        "/threshold — Set alert minimum ($, Hunter+)
+"
+        "/digest — Get today's activity summary
+"
+        "/cancel — Cancel subscription
+
+"
+        "<b>Alert thresholds:</b>
+"
+        "🆓 Free — alerts on moves > $500
+"
+        "🎯 Hunter — custom from $100
+"
+        "⚡ Apex — custom from $1
+
+"
+        "<b>Supported chains:</b>
+"
+        "⟠ ETH · ◎ SOL · ⬡ BSC · 🔵 Base
+
+"
+        "<b>Plans:</b>
+"
+        "🆓 Scout — 3 wallets · Free
+"
+        "🎯 Hunter — 25 wallets · $19/mo
+"
+        "⚡ Apex — Unlimited · $49/mo
+
+"
+        "Questions? Just message us here 👇",
         parse_mode="HTML",
         reply_markup=back_kb()
     )
