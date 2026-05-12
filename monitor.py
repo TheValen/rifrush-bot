@@ -4,13 +4,46 @@ import os
 import aiohttp
 from aiogram import Bot
 
-from database import get_all_wallets, update_last_tx, check_and_expire_plans
+from database import get_all_wallets, update_last_tx, check_and_expire_plans, get_user
 from utils import short_addr, CHAIN_EMOJI, CHAIN_LABELS
 
 ETHERSCAN_KEY = os.getenv("ETHERSCAN_API_KEY", "")
 HELIUS_KEY = os.getenv("HELIUS_API_KEY", "")
 
 CHECK_INTERVAL = 60
+
+# ── PLAN THRESHOLDS ─────────────────────────────────────
+# Minimum USD value to trigger alert per plan
+
+PLAN_THRESHOLDS = {
+    "free":   500,   # $500 minimum — no spam
+    "hunter": 100,   # $100 minimum — configurable later
+    "apex":   1,     # $1 minimum — everything
+}
+
+def get_tx_usd_value(tx: dict) -> float:
+    """Estimate USD value of transaction. Returns 0 if can't determine."""
+    try:
+        tx_type = tx.get("_tx_type", "native")
+        if tx_type == "token":
+            symbol = tx.get("tokenSymbol", "").upper()
+            decimals = int(tx.get("tokenDecimal", 18))
+            value = int(tx.get("value", 0)) / (10 ** decimals)
+            # Stablecoins: 1:1 USD
+            if symbol in ("USDT", "USDC", "DAI", "BUSD", "TUSD", "USDP", "FRAX"):
+                return value
+            # For other tokens we can't know exact USD — let it through
+            return 999999
+        else:
+            # Native tx — ETH/BNB value in wei
+            value_eth = int(tx.get("value", 0)) / 1e18
+            # Rough estimate: assume ETH ~$3000, BNB ~$600
+            # Better to let through unknown amounts than block real alerts
+            return value_eth * 3000
+    except Exception:
+        return 999999  # Unknown — let through
+
+
 
 logger = logging.getLogger(__name__)
 
@@ -300,16 +333,16 @@ async def check_wallet(
     session: aiohttp.ClientSession,
     wallet: dict
 ):
-    address = wallet["address"]
-    chain = wallet["chain"]
-    user_id = wallet["user_id"]
-    label = wallet.get("label", "")
-
-    last_tx = wallet.get("last_tx")
+    address  = wallet["address"]
+    chain    = wallet["chain"]
+    user_id  = wallet["user_id"]
+    label    = wallet.get("label", "")
+    last_tx  = wallet.get("last_tx")
     wallet_id = wallet["id"]
 
     new_tx_hash = None
-    alert_text = None
+    alert_text  = None
+    tx_for_threshold = None  # Store tx to check value
 
     # ── SOLANA ──
 
@@ -325,24 +358,16 @@ async def check_wallet(
 
         if signature and signature != last_tx:
             new_tx_hash = signature
-            alert_text = format_sol_alert(
-                signature,
-                address,
-                label
-            )
+            alert_text  = format_sol_alert(signature, address, label)
+            # SOL: no easy USD value, always send
 
     # ── EVM ──
 
     elif chain in ("eth", "bsc", "base"):
 
-        tx = await get_latest_evm_tx(
-            session,
-            address,
-            chain
-        )
+        tx = await get_latest_evm_tx(session, address, chain)
 
         if tx:
-
             tx_hash = tx.get("hash")
 
             logger.info(
@@ -352,28 +377,43 @@ async def check_wallet(
             )
 
             if tx_hash and tx_hash != last_tx:
-
-                new_tx_hash = tx_hash
-
-                alert_text = format_evm_alert(
-                    tx,
-                    address,
-                    chain,
-                    label
-                )
+                new_tx_hash      = tx_hash
+                alert_text       = format_evm_alert(tx, address, chain, label)
+                tx_for_threshold = tx
 
         else:
-            logger.warning(
-                f"EVM {short_addr(address)} [{chain}] "
-                f"NO TX RETURNED"
-            )
+            logger.warning(f"EVM {short_addr(address)} [{chain}] NO TX RETURNED")
+
+    # ── THRESHOLD CHECK ──
+
+    if new_tx_hash and alert_text:
+
+        # Get user plan and threshold
+        try:
+            user      = await get_user(user_id)
+            plan      = user["plan"] if user else "free"
+            threshold = PLAN_THRESHOLDS.get(plan, 500)
+        except Exception:
+            plan      = "free"
+            threshold = 500
+
+        # Check EVM transaction value against threshold
+        if tx_for_threshold is not None:
+            usd_value = get_tx_usd_value(tx_for_threshold)
+            if usd_value < threshold:
+                logger.info(
+                    f"Skipped alert: ${usd_value:.0f} < threshold ${threshold} "
+                    f"(plan={plan}, {short_addr(address)})"
+                )
+                # Still update last_tx so we don't recheck same tx
+                await update_last_tx(wallet_id, new_tx_hash)
+                return
 
     # ── SEND ALERT ──
 
     if new_tx_hash and alert_text:
 
         try:
-
             await bot.send_message(
                 chat_id=user_id,
                 text=alert_text,
@@ -381,18 +421,9 @@ async def check_wallet(
                 disable_web_page_preview=True
             )
 
-            await update_last_tx(
-                wallet_id,
-                new_tx_hash
-            )
+            await update_last_tx(wallet_id, new_tx_hash)
 
-            logger.info(
-                f"Alert sent to {user_id} "
-                f"for {short_addr(address)}"
-            )
+            logger.info(f"Alert sent to {user_id} for {short_addr(address)}")
 
         except Exception as e:
-            logger.error(
-                f"Failed sending alert "
-                f"to {user_id}: {e}"
-            )
+            logger.error(f"Failed sending alert to {user_id}: {e}")
